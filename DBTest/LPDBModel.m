@@ -31,6 +31,14 @@ NSMutableArray *checkedTables;
 {
     // Recurse up the classes, but stop at NSObject. Each class only reports its own properties, not those inherited from its superclass
     
+    static NSMutableDictionary *propsByClass = nil;
+    
+    if (propsByClass == nil)
+        propsByClass = [[NSMutableDictionary alloc] init];
+    
+    if ([[propsByClass allKeys] containsObject:[self className]])
+        return [propsByClass objectForKey:[self className]];
+    
     NSMutableDictionary *theProps;
     
     if ([self superclass] != [NSObject class])
@@ -64,6 +72,8 @@ NSMutableArray *checkedTables;
             }
         }
     }
+    [propsByClass setValue: theProps forKey: [self className]];
+    
     free(propList);
     return theProps;
 }
@@ -230,7 +240,6 @@ NSMutableArray *checkedTables;
             assert(success);
         }];
         
-        
     }
 }
 
@@ -272,70 +281,54 @@ NSMutableArray *checkedTables;
 
 - (void)save
 {
-    NSDictionary *props = [[self class] propertiesWithEncodedTypes];
-    NSArray *allPropNames = [props allKeys];
-    
-    if (_pk == -1) { // record not ever saved
-        _dirty = YES;
-    } else {
-        for (NSString *propName in allPropNames) {
-            NSString *propType = [props objectForKey:propName];
-            id theProperty = [self valueForKey:propName];
-            if ([propType hasPrefix: @"@"]) { // it's object
-                NSString *className = [propType substringWithRange:NSMakeRange(2, [propType length]-3)];
+    if (_dirty) {
+        _dirty = NO;
+        
+        NSDictionary *props = [[self class] propertiesWithEncodedTypes];
+        NSArray *allPropNames = [props allKeys];
+        static NSMutableDictionary *sqlCaches = nil;
+        
+        if (sqlCaches == nil)
+            sqlCaches = [[NSMutableDictionary alloc] init];
+        
+        NSMutableString *updateSQL = nil;
+        if ([[sqlCaches allKeys] containsObject:[self className]])
+            updateSQL = [sqlCaches objectForKey:[self className]];
+        
+        if (updateSQL == nil) {
+            updateSQL = [NSMutableString stringWithFormat:@"INSERT OR REPLACE INTO %@ (", [[self class] tableName]];
+            NSMutableString *bindSQL = [NSMutableString string];
+            NSInteger index = 0;
+            for (NSString *propName in allPropNames) {
+                NSString *propType = [props objectForKey: propName];
+                NSString *className = @"";
+                if ([propType hasPrefix: @"@"])
+                    className = [propType substringWithRange: NSMakeRange(2, [propType length] - 3)];
                 if (!(isCollectionType(className))) {
-                    if ([[theProperty class] isSubclassOfClass:[LPDBModel class]])
-                        if ([(LPDBModel *)theProperty isDirty])
-                            _dirty = YES;
-                } else {
-                    if (isNSSetType(className) || isNSArrayType(className)) {
-                        for (id oneObject in (NSArray *)theProperty) {
-                            if ([oneObject isKindOfClass:[LPDBModel class]]) {
-                                if ([oneObject isDirty]) {
-                                    _dirty = YES;
-                                    break;
-                                }
-                            } else if (isNSDictionaryType(oneObject)) {
-                                for (id oneKey in [theProperty allKeys]) {
-                                    id oneObject = [theProperty objectForKey: oneKey];
-                                    if ([oneObject isKindOfClass:[LPDBModel class]])
-                                        if ([(LPDBModel *)oneObject isDirty]) {
-                                            _dirty = YES;
-                                            break;
-                                        }
-                                }
-                            }
-                        }
+                    if (index++ == allPropNames.count - 1) {
+                        [updateSQL appendFormat: @"%@", [propName stringAsSQLColumnName]];
+                        [bindSQL appendString: @"?"];
+                    } else {
+                        [updateSQL appendFormat: @"%@, ", [propName stringAsSQLColumnName]];
+                        [bindSQL appendString: @"?, "];
                     }
                 }
             }
-            if (_dirty)
-                break;
-        }
-    }
-    
-    if (_dirty) {
-        _dirty = NO;
-        NSMutableString *updateSQL = [NSMutableString stringWithFormat:@"INSERT OR REPLACE INTO %@ (", [[self class] tableName]];
-        NSMutableString *bindSQL = [NSMutableString string];
-        NSInteger index = 0;
-        for (NSString *propName in allPropNames) {
-            NSString *propType = [props objectForKey: propName];
-            NSString *className = @"";
-            if ([propType hasPrefix: @"@"])
-                className = [propType substringWithRange: NSMakeRange(2, [propType length] - 3)];
-            if (!(isCollectionType(className))) {
-                if (index++ == allPropNames.count - 1) {
-                    [updateSQL appendFormat: @"%@", [propName stringAsSQLColumnName]];
-                    [bindSQL appendString: @"?"];
-                } else {
-                    [updateSQL appendFormat: @"%@, ", [propName stringAsSQLColumnName]];
-                    [bindSQL appendString: @"?, "];
-                }
-            }
+            
+            [updateSQL appendFormat:@") VALUES (%@)", bindSQL];
         }
         
-        [updateSQL appendFormat:@") VALUES (%@)", bindSQL];
+        NSMutableArray *values = [NSMutableArray array];
+        for (NSString *propName in allPropNames) {
+            id theProperty = [self valueForKey: propName];
+            NSLog(@"%@", theProperty);
+            [values addObject: theProperty];
+        }
+        
+        [[LPDBManager shareManager].queue inDatabase:^(FMDatabase *db) {
+            BOOL success = [db executeUpdate: updateSQL withArgumentsInArray: values];
+            assert(success);
+        }];
         
         NSLog(@"%@", updateSQL);
     }

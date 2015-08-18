@@ -7,7 +7,17 @@
 //
 
 #import "Person.h"
-
 @implementation Person
-
+- (instancetype)init
+{
+    if (self = [super init]) {
+        _age = 0;
+        _sex = NO;
+        _name = @"";
+        _hight = 0;
+        _nickName = @"";
+        _level = 0;
+    }
+    return self;
+}
 @end
